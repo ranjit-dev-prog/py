@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-🚀 CyberStrike AI — All-in-One Security Scanner for Your Website
+🚀 CyberStrike AI — All-in-One Security Scanner (PDF-Only Output)
 - Enter your URL and get a comprehensive security assessment
 - AI-enhanced vulnerability detection with false positive reduction
 - Directory scanning, port scanning, and domain intelligence
-- Generates detailed JSON and executive summary reports
+- Generates a SINGLE, professional PDF report
 """
 
 import asyncio
 import aiohttp
-import json
 import os
 import re
 import sys
@@ -42,6 +41,16 @@ except ImportError:
     class Fore:
         RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = RESET = ""
 
+# PDF Support
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.units import inch
+
 # -------------------------
 # Configuration & Globals
 # -------------------------
@@ -66,8 +75,7 @@ class Config:
     DEFAULT_CONCURRENCY = 15
     DEFAULT_TIMEOUT = 15
     DEFAULT_DELAY = 0.3
-    REPORT_JSON = "cyberstrike_report.json"
-    EXECUTIVE_SUMMARY = "executive_summary.txt"
+    REPORT_PDF = "cyberstrike_report.pdf"  # Default, will be overridden per target
     _seen_payloads: Set[str] = set()
 
 # -------------------------
@@ -134,7 +142,7 @@ def load_payloads() -> List[str]:
         # XXE
         '<?xml version="1.0"?><!DOCTYPE data [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><data>&xxe;</data>',
         # Open Redirect
-        "https://evil.com",
+        "https://evil.com  ",
         "//evil.com",
         # SSRF
         "http://169.254.169.254",
@@ -148,7 +156,6 @@ def load_payloads() -> List[str]:
                 f.write(p + "\n")
         print(f"{Fore.YELLOW}[*] Created payloads.txt with default payloads.{Fore.RESET}")
 
-    # Also return the default payloads for immediate use
     return default_payloads
 
 def safe_filter_payloads(payloads: List[str], aggressive: bool = False) -> List[str]:
@@ -246,36 +253,257 @@ def analyze_response_traditional(orig_payload: str, resp_text: str, status: int,
     findings = []
     lowtext = resp_text.lower()
 
-    # Check for reflected XSS
     if orig_payload and orig_payload in resp_text:
         findings.append({"type": "reflection", "confidence": 0.3, "detail": "Payload reflected", "source": "pattern_match"})
 
-    # Check for SQL errors
     for sig in SQL_ERROR_SIGNS:
         if sig in lowtext:
             findings.append({"type": "sql_injection", "confidence": 0.7, "detail": f"SQL error: {sig}", "source": "pattern_match"})
             break
 
-    # Check for XSS indicators
     for sig in XSS_SIGNS:
         if sig.lower() in lowtext:
             findings.append({"type": "xss", "confidence": 0.6, "detail": f"XSS pattern: {sig}", "source": "pattern_match"})
             break
 
-    # Check for server errors
     if status >= 500:
         findings.append({"type": "server_error", "confidence": 0.4, "detail": f"HTTP {status}", "source": "pattern_match"})
 
-    # Check for information disclosure in headers
     disclosure_headers = [f"{h}: {headers[h]}" for h in ["server", "x-powered-by", "x-aspnet-version"] if h in headers]
     if disclosure_headers:
         findings.append({"type": "header_disclosure", "confidence": 0.2, "detail": "; ".join(disclosure_headers), "source": "pattern_match"})
 
-    # Check for timing anomalies (potential blind injection)
     if rtime > 8.0:
         findings.append({"type": "timing_attack", "confidence": 0.5, "detail": f"Slow response: {rtime:.2f}s", "source": "timing_analysis"})
 
     return findings
+
+# -------------------------
+# PDF Report Generator
+# -------------------------
+
+class PDFReportGenerator:
+    def __init__(self, filename: str):
+        self.filename = filename
+        self.styles = getSampleStyleSheet()
+        self.story = []
+        self._init_styles()
+
+    def _init_styles(self):
+        # Title Style
+        self.styles.add(ParagraphStyle(
+            name='TitleLarge',
+            parent=self.styles['Title'],
+            fontSize=24,
+            spaceAfter=30,
+            alignment=TA_CENTER
+        ))
+
+        # Subtitle Style
+        self.styles.add(ParagraphStyle(
+            name='Subtitle',
+            parent=self.styles['Normal'],
+            fontSize=14,
+            textColor=colors.grey,
+            spaceAfter=20,
+            alignment=TA_CENTER
+        ))
+
+        # Section Header
+        self.styles.add(ParagraphStyle(
+            name='SectionHeader',
+            parent=self.styles['Heading2'],
+            fontSize=16,
+            textColor=colors.darkblue,
+            spaceBefore=20,
+            spaceAfter=10
+        ))
+
+        # Finding Header
+        self.styles.add(ParagraphStyle(
+            name='FindingHeader',
+            parent=self.styles['Heading3'],
+            fontSize=14,
+            textColor=colors.black,
+            spaceBefore=15,
+            spaceAfter=5
+        ))
+
+        # Code Block
+        self.styles.add(ParagraphStyle(
+            name='Code',
+            parent=self.styles['Normal'],
+            fontName='Courier',
+            fontSize=9,
+            backColor=colors.lightgrey,
+            borderColor=colors.grey,
+            borderWidth=0.5,
+            borderPadding=5,
+            spaceAfter=10
+        ))
+
+    def add_title_page(self, target_url: str, scan_time: str):
+        self.story.append(Spacer(1, 2*inch))
+        self.story.append(Paragraph("🛡️ CYBERSTRIKE AI", self.styles['TitleLarge']))
+        self.story.append(Paragraph("COMPREHENSIVE SECURITY SCAN REPORT", self.styles['Subtitle']))
+        self.story.append(Spacer(1, 0.5*inch))
+        self.story.append(Paragraph(f"<b>Target:</b> {target_url}", self.styles['Normal']))
+        self.story.append(Paragraph(f"<b>Scan Completed:</b> {scan_time}", self.styles['Normal']))
+        self.story.append(PageBreak())
+
+    def add_executive_summary(self, stats: Dict[str, Any], risk_score: float):
+        self.story.append(Paragraph("📊 EXECUTIVE SUMMARY", self.styles['SectionHeader']))
+        
+        # Summary table
+        summary_data = [
+            ["Metric", "Value"],
+            ["Total Vulnerabilities", str(stats['total_vulnerabilities'])],
+            ["AI Verified Findings", str(stats['ai_discovered'])],
+            ["High Confidence Findings", str(stats['high_confidence'])],
+            ["Risky Directories Found", str(stats['risky_directories'])],
+            ["Open Ports Detected", str(stats['open_ports'])],
+            ["Overall Risk Score", f"{risk_score:.1f}"]
+        ]
+        
+        summary_table = Table(summary_data, colWidths=[250, 150])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.darkblue),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), 12),
+            ('BOTTOMPADDING', (0,0), (-1,0), 12),
+            ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+            ('GRID', (0,0), (-1,-1), 1, colors.black)
+        ]))
+        
+        self.story.append(summary_table)
+        self.story.append(Spacer(1, 20))
+
+        # Risk score explanation
+        risk_level = "LOW"
+        if risk_score > 50: risk_level = "HIGH"
+        elif risk_score > 20: risk_level = "MEDIUM"
+        
+        self.story.append(Paragraph(f"<b>Risk Assessment: {risk_level}</b>", self.styles['Heading3']))
+        self.story.append(Paragraph("This score is calculated based on severity, confidence, and quantity of findings.", self.styles['Normal']))
+        self.story.append(Spacer(1, 20))
+
+    def add_vulnerabilities_section(self, findings: List[AIVulnerabilityFinding]):
+        if not findings:
+            return
+            
+        self.story.append(Paragraph("🔍 DETAILED VULNERABILITIES", self.styles['SectionHeader']))
+        
+        for i, finding in enumerate(findings, 1):
+            # Color coding by severity
+            color = colors.red if finding.severity == "CRITICAL" else \
+                    colors.orangered if finding.severity == "HIGH" else \
+                    colors.orange if finding.severity == "MEDIUM" else \
+                    colors.blue
+            
+            self.story.append(Paragraph(f"Finding #{i}: {finding.vulnerability_type} ({finding.severity})", self.styles['FindingHeader']))
+            
+            # Details table
+            details_data = [
+                ["URL", finding.url],
+                ["Method", finding.method],
+                ["Parameter", finding.injected_param],
+                ["Confidence", f"{finding.confidence:.2f}"],
+                ["Status Code", str(finding.response_status)],
+                ["Response Time", f"{finding.response_time:.2f}s"],
+                ["Detection Source", finding.detection_source]
+            ]
+            
+            details_table = Table(details_data, colWidths=[100, 300])
+            details_table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (0,-1), colors.lightgrey),
+                ('ALIGN', (0,0), (0,-1), 'RIGHT'),
+                ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+                ('GRID', (0,0), (-1,-1), 1, colors.grey),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('FONTSIZE', (0,0), (-1,-1), 9)
+            ]))
+            
+            self.story.append(details_table)
+            
+            # AI Analysis
+            if finding.ai_analysis:
+                self.story.append(Paragraph("<b>AI Analysis:</b>", self.styles['Heading4']))
+                self.story.append(Paragraph(f"<b>Remediation:</b> {finding.ai_analysis.get('remediation', 'N/A')}", self.styles['Normal']))
+                self.story.append(Paragraph(f"<b>Exploitation Difficulty:</b> {finding.ai_analysis.get('exploitation_difficulty', 'N/A')}", self.styles['Normal']))
+            
+            self.story.append(Spacer(1, 15))
+
+    def add_directory_findings(self, findings: List[Dict[str, Any]]):
+        if not findings:
+            return
+            
+        self.story.append(Paragraph("📁 DIRECTORY SCAN RESULTS", self.styles['SectionHeader']))
+        
+        for finding in findings:
+            status_color = "green" if finding['status_code'] == 200 else "orange" if finding['status_code'] in [301, 302] else "red" if finding['status_code'] == 403 else "black"
+            risk_marker = "⚠️ " if finding['is_risky'] else ""
+            self.story.append(Paragraph(f"<font color='{status_color}'>{risk_marker}[{finding['status_code']}] {finding['url']}</font>", self.styles['Normal']))
+        
+        self.story.append(Spacer(1, 20))
+
+    def add_port_scan_results(self, ports: List[int]):
+        if not ports:
+            return
+            
+        self.story.append(Paragraph("📡 PORT SCAN RESULTS", self.styles['SectionHeader']))
+        ports_str = ", ".join(map(str, ports))
+        self.story.append(Paragraph(f"Open Ports: <b>{ports_str}</b>", self.styles['Normal']))
+        self.story.append(Spacer(1, 20))
+
+    def add_domain_intelligence(self, intel: Dict[str, Any]):
+        if not intel:
+            return
+            
+        self.story.append(Paragraph("🧠 DOMAIN INTELLIGENCE", self.styles['SectionHeader']))
+        
+        intel_data = [
+            ["Domain", intel.get('domain', 'N/A')],
+            ["IP Address", intel.get('ip_address', 'Unknown')],
+            ["Hosting Provider", intel.get('hosting_provider', 'Unknown')],
+        ]
+        
+        if intel.get('ssl_info'):
+            intel_data.append(["SSL Valid Until", intel['ssl_info']])
+            
+        intel_table = Table(intel_data, colWidths=[150, 250])
+        intel_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (0,-1), colors.lightgrey),
+            ('ALIGN', (0,0), (0,-1), 'RIGHT'),
+            ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 1, colors.grey),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ]))
+        
+        self.story.append(intel_table)
+        
+        # Risk indicators
+        if intel.get('risk_indicators'):
+            self.story.append(Paragraph("<b>Risk Indicators:</b>", self.styles['Heading4']))
+            indicators = intel['risk_indicators']
+            for key, value in indicators.items():
+                if value:
+                    self.story.append(Paragraph(f"• {key.replace('_', ' ').title()}", self.styles['Normal']))
+        
+        self.story.append(Spacer(1, 20))
+
+    def generate(self):
+        doc = SimpleDocTemplate(
+            self.filename,
+            pagesize=letter,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72
+        )
+        doc.build(self.story)
+        print(f"{Fore.GREEN}✅ PDF report saved: {self.filename}{Fore.RESET}")
 
 # -------------------------
 # Core Scanner
@@ -418,7 +646,6 @@ class CyberStrikeScanner:
         """Scan for common directories and files"""
         print(f"{Fore.CYAN}🔍 Starting directory scan on: {base_url}{Fore.RESET}")
         
-        # Common directory wordlist
         wordlist = [
             "admin", "login", "wp-admin", "dashboard", "api", "uploads", "backup", 
             "config", "phpmyadmin", "cpanel", "webmail", "cgi-bin", "robots.txt",
@@ -471,7 +698,6 @@ class CyberStrikeScanner:
         """Scan common ports on target"""
         print(f"{Fore.CYAN}📡 Starting port scan on: {target}{Fore.RESET}")
         
-        # Common web-related ports to scan
         common_ports = [21, 22, 23, 25, 53, 80, 443, 445, 3306, 3389, 5432, 8080, 8443, 8000, 9000, 9090]
         
         open_ports = []
@@ -526,15 +752,14 @@ class CyberStrikeScanner:
             "risk_indicators": {}
         }
         
-        # Get IP address
         try:
             intel["ip_address"] = socket.gethostbyname(domain)
         except:
             pass
             
-        # Get SSL info (if HTTPS)
         if parsed.scheme == 'https':
             try:
+                import ssl
                 context = ssl.create_default_context()
                 with socket.create_connection((domain, 443), timeout=5) as sock:
                     with context.wrap_socket(sock, server_hostname=domain) as ssock:
@@ -543,7 +768,6 @@ class CyberStrikeScanner:
             except:
                 pass
                 
-        # Get hosting provider
         if intel["ip_address"]:
             try:
                 response = requests.get(f"https://ipinfo.io/{intel['ip_address']}/json", timeout=5)
@@ -552,7 +776,6 @@ class CyberStrikeScanner:
             except:
                 pass
                 
-        # Get DNS records
         record_types = ['A', 'MX', 'NS', 'TXT']
         for rtype in record_types:
             try:
@@ -561,7 +784,6 @@ class CyberStrikeScanner:
             except:
                 intel["dns_records"][rtype] = []
                 
-        # Risk indicators
         intel["risk_indicators"] = {
             "suspicious_url": any(k in url.lower() for k in ['login', 'secure', 'verify', 'update', 'bonus', 'win', 'bank', 'signin', 'paypal']),
             "ip_based": bool(re.match(r'^\d{1,3}(\.\d{1,3}){3}$', domain)),
@@ -570,7 +792,6 @@ class CyberStrikeScanner:
         
         self.domain_intel = intel
         
-        # Print summary
         print(f"{Fore.BLUE}🌐 IP Address: {intel['ip_address'] or 'Unknown'}{Fore.RESET}")
         if intel["ssl_info"]:
             print(f"{Fore.BLUE}🔐 SSL Certificate: Valid until {intel['ssl_info']}{Fore.RESET}")
@@ -586,11 +807,10 @@ class CyberStrikeScanner:
         risky_directories = sum(1 for f in self.directory_findings if f["is_risky"])
         open_ports = len(self.port_scan_results)
         
-        # Calculate a simple risk score
         severity_weights = {"LOW": 1, "MEDIUM": 3, "HIGH": 7, "CRITICAL": 10}
         risk_score = sum(severity_weights.get(f.severity, 1) * f.confidence for f in self.report)
-        risk_score += risky_directories * 2  # Add weight for risky directories
-        risk_score += open_ports * 1.5  # Add weight for open ports
+        risk_score += risky_directories * 2
+        risk_score += open_ports * 1.5
         
         return {
             "total_vulnerabilities": total_vulns,
@@ -605,96 +825,15 @@ class CyberStrikeScanner:
         }
 
 # -------------------------
-# Reporting
-# -------------------------
-
-def save_json_report(scanner: CyberStrikeScanner, stats: Dict[str, Any], json_path: str = Config.REPORT_JSON):
-    """Saves a comprehensive JSON report."""
-    report_data = {
-        "scan_summary": {
-            "vulnerability_summary": stats,
-            "scan_time": time.strftime("%Y-%m-%d %H:%M:%S")
-        },
-        "domain_intelligence": scanner.domain_intel,
-        "directory_findings": scanner.directory_findings,
-        "port_scan_results": scanner.port_scan_results,
-        "detailed_vulnerabilities": [asdict(f) for f in scanner.report]
-    }
-    
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(report_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"{Fore.GREEN}✅ JSON report saved: {json_path}{Fore.RESET}")
-
-def save_executive_summary(scanner: CyberStrikeScanner, stats: Dict[str, Any], txt_path: str = Config.EXECUTIVE_SUMMARY):
-    """Saves a human-readable executive summary."""
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write("=== CYBERSTRIKE AI - COMPREHENSIVE SECURITY REPORT ===\n\n")
-        f.write(f"Scan Completed: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Overall Risk Score: {stats['risk_score']}\n\n")
-        
-        f.write("=== VULNERABILITY SUMMARY ===\n")
-        f.write(f"Total Vulnerabilities: {stats['total_vulnerabilities']}\n")
-        f.write(f"AI Verified Findings: {stats['ai_discovered']}\n")
-        f.write(f"High Confidence Findings: {stats['high_confidence']}\n\n")
-        
-        f.write("=== ADDITIONAL FINDINGS ===\n")
-        f.write(f"Directory Findings: {stats['directory_findings']}\n")
-        f.write(f"Risky Directories: {stats['risky_directories']}\n")
-        f.write(f"Open Ports: {stats['open_ports']}\n\n")
-        
-        if scanner.report:
-            f.write("=== DETAILED VULNERABILITIES ===\n\n")
-            for i, finding in enumerate(scanner.report, 1):
-                f.write(f"--- Finding #{i} ---\n")
-                f.write(f"URL: {finding.url}\n")
-                f.write(f"Type: {finding.vulnerability_type}\n")
-                f.write(f"Severity: {finding.severity}\n")
-                f.write(f"Confidence: {finding.confidence:.2f}\n")
-                f.write(f"Source: {finding.detection_source}\n")
-                if finding.ai_analysis:
-                    f.write(f"Remediation: {finding.ai_analysis['remediation']}\n")
-                f.write("\n")
-        
-        if scanner.directory_findings:
-            f.write("=== DIRECTORY FINDINGS ===\n\n")
-            for finding in scanner.directory_findings:
-                if finding["is_risky"]:
-                    f.write(f"⚠️  [RISKY] {finding['url']} (Status: {finding['status_code']})\n")
-                else:
-                    f.write(f"✅ {finding['url']} (Status: {finding['status_code']})\n")
-            f.write("\n")
-            
-        if scanner.port_scan_results:
-            f.write("=== OPEN PORTS ===\n")
-            f.write(f"{', '.join(map(str, scanner.port_scan_results))}\n\n")
-    
-    print(f"{Fore.GREEN}✅ Executive summary saved: {txt_path}{Fore.RESET}")
-
-def print_summary(stats: Dict[str, Any]):
-    """Prints a summary to the console."""
-    print(f"\n{Fore.MAGENTA}" + "="*60)
-    print(f"{Fore.CYAN}📊 CYBERSTRIKE AI SCAN COMPLETE")
-    print(f"{Fore.MAGENTA}" + "="*60 + f"{Fore.RESET}")
-    print(f"{Fore.GREEN}Total Vulnerabilities:   {stats['total_vulnerabilities']}{Fore.RESET}")
-    print(f"{Fore.BLUE}AI Verified:            {stats['ai_discovered']}{Fore.RESET}")
-    print(f"{Fore.YELLOW}Risky Directories:      {stats['risky_directories']}{Fore.RESET}")
-    print(f"{Fore.CYAN}Open Ports:             {stats['open_ports']}{Fore.RESET}")
-    print(f"{Fore.RED}Overall Risk Score:     {stats['risk_score']}{Fore.RESET}")
-    print(f"{Fore.MAGENTA}" + "="*60 + f"{Fore.RESET}")
-
-# -------------------------
 # Main Execution
 # -------------------------
 
 async def main():
-    # Prompt user for target URL
-    print(f"{Fore.CYAN}🚀 Welcome to CyberStrike AI - All-in-One Security Scanner{Fore.RESET}")
+    print(f"{Fore.CYAN}🚀 Welcome to CyberStrike AI - All-in-One Security Scanner (PDF-Only){Fore.RESET}")
     print(f"{Fore.YELLOW}Enter the URL of the website you want to scan:{Fore.RESET}")
     
     target_url = input(f"{Fore.GREEN}URL: {Fore.RESET}").strip()
     
-    # Validate and normalize URL
     if not target_url:
         print(f"{Fore.RED}❌ No URL provided. Exiting.{Fore.RESET}")
         return
@@ -702,11 +841,10 @@ async def main():
     if not target_url.startswith(('http://', 'https://')):
         target_url = 'https://' + target_url
     
-    # Parse URL to validate
     try:
         parsed = urlparse(target_url)
         if not parsed.netloc:
-            print(f"{Fore.RED}❌ Invalid URL format. Please enter a valid URL (e.g., https://your-website.com){Fore.RESET}")
+            print(f"{Fore.RED}❌ Invalid URL format. Please enter a valid URL.{Fore.RESET}")
             return
     except Exception:
         print(f"{Fore.RED}❌ Invalid URL format. Please enter a valid URL.{Fore.RESET}")
@@ -714,14 +852,12 @@ async def main():
     
     print(f"{Fore.CYAN}🎯 Target URL: {target_url}{Fore.RESET}")
     
-    # Load payloads
     payloads = load_payloads()
     payloads = safe_filter_payloads(payloads)
     if not payloads:
         print(f"{Fore.RED}[!] No payloads available. Exiting.{Fore.RESET}")
         return
 
-    # Initialize AI (if API key available)
     ai_analyzer = None
     gemini_key = os.getenv('GEMINI_API_KEY')
     if gemini_key and GOOGLE_AI_AVAILABLE:
@@ -731,7 +867,6 @@ async def main():
         except Exception as e:
             print(f"{Fore.RED}[!] AI init failed: {e}{Fore.RESET}")
 
-    # Start scanning
     timeout_obj = aiohttp.ClientTimeout(total=Config.DEFAULT_TIMEOUT)
     connector = aiohttp.TCPConnector(limit_per_host=Config.DEFAULT_CONCURRENCY)
     
@@ -739,42 +874,48 @@ async def main():
         print(f"\n{Fore.CYAN}🚀 Starting comprehensive security scan...{Fore.RESET}")
         print(f"{Fore.CYAN}{'='*50}{Fore.RESET}")
         
-        # Create scanner instance
         scanner = CyberStrikeScanner(session, ai_analyzer, Config.DEFAULT_CONCURRENCY, Config.DEFAULT_DELAY)
         
-        # 1. Gather domain intelligence
+        # Run all scans
         scanner.gather_domain_intelligence(target_url)
-        
-        # 2. Run port scan
         parsed_target = urlparse(target_url)
         domain = parsed_target.netloc
         scanner.run_port_scan(domain)
-        
-        # 3. Run directory scan
         scanner.run_directory_scan(target_url)
-        
-        # 4. Run vulnerability scan
         print(f"{Fore.CYAN}🔍 Starting vulnerability scan on: {target_url}{Fore.RESET}")
         await scanner.run_vulnerability_scan(target_url, payloads, Config.DEFAULT_TIMEOUT, ["GET", "POST"])
         
-        # Generate reports
-        stats = scanner.get_statistics()
-        domain_name = domain.replace(".", "_")
-        save_json_report(scanner, stats, f"{domain_name}_report.json")
-        save_executive_summary(scanner, stats, f"{domain_name}_summary.txt")
+        # Generate PDF report ONLY
+        scan_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        domain_name = domain.replace(".", "_").replace(":", "_")
+        pdf_filename = f"cyberstrike_report_{domain_name}.pdf"
         
-        # Print summary
-        print_summary(stats)
+        pdf_gen = PDFReportGenerator(pdf_filename)
+        pdf_gen.add_title_page(target_url, scan_time)
+        
+        stats = scanner.get_statistics()
+        pdf_gen.add_executive_summary(stats, stats['risk_score'])
+        pdf_gen.add_vulnerabilities_section(scanner.report)
+        pdf_gen.add_directory_findings(scanner.directory_findings)
+        pdf_gen.add_port_scan_results(scanner.port_scan_results)
+        pdf_gen.add_domain_intelligence(scanner.domain_intel)
+        
+        pdf_gen.generate()
+        
+        # Print summary to console
+        print(f"\n{Fore.MAGENTA}" + "="*60)
+        print(f"{Fore.CYAN}📊 CYBERSTRIKE AI SCAN COMPLETE")
+        print(f"{Fore.MAGENTA}" + "="*60 + f"{Fore.RESET}")
+        print(f"{Fore.GREEN}Total Vulnerabilities:   {stats['total_vulnerabilities']}{Fore.RESET}")
+        print(f"{Fore.BLUE}AI Verified:            {stats['ai_discovered']}{Fore.RESET}")
+        print(f"{Fore.YELLOW}Risky Directories:      {stats['risky_directories']}{Fore.RESET}")
+        print(f"{Fore.CYAN}Open Ports:             {stats['open_ports']}{Fore.RESET}")
+        print(f"{Fore.RED}Overall Risk Score:     {stats['risk_score']}{Fore.RESET}")
+        print(f"{Fore.MAGENTA}" + "="*60 + f"{Fore.RESET}")
         
         print(f"\n{Fore.GREEN}🎉 Scan completed successfully!{Fore.RESET}")
-        print(f"{Fore.YELLOW}Reports saved as:")
-        print(f"  • {domain_name}_report.json")
-        print(f"  • {domain_name}_summary.txt{Fore.RESET}")
+        print(f"{Fore.YELLOW}PDF Report saved as: {pdf_filename}{Fore.RESET}")
 
 if __name__ == "__main__":
-    # Import random here to avoid issues
-    import random
     import ssl
-    
-    # Run the main function
     asyncio.run(main())

